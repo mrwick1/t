@@ -13,6 +13,9 @@ pub enum Target {
     Js { dir: PathBuf, tool: &'static str, file: String },
 }
 
+/// The score of a test that must run: a changed test file, or a test that reads a changed data file.
+pub const MUST: usize = usize::MAX;
+
 pub struct Hit {
     pub target: Target,
     /// The path to show and pass back to `t`.
@@ -61,6 +64,12 @@ fn stem(p: &str) -> &str {
     n.split('.').next().unwrap_or(n)
 }
 
+/// A file that tests can read as data. Docs, lock files and images are not.
+pub fn is_data(path: &str) -> bool {
+    matches!(path.rsplit_once('.').map(|(_, e)| e), Some("json" | "jsonl" | "yaml" | "yml" | "toml" | "csv" | "tsv" | "txt" | "sql" | "html" | "xml" | "snap"))
+        && !path.ends_with("Cargo.toml") && !path.ends_with("pyproject.toml") && !path.ends_with("package.json")
+}
+
 pub fn is_test(path: &str) -> bool {
     let n = file_name(path);
     match lang(path) {
@@ -97,11 +106,11 @@ impl Repo<'_> {
         std::fs::read_to_string(self.root.join(rel)).unwrap_or_default()
     }
 
-    /// The tests to run for one changed file, best first.
+    /// The tests to run for one changed file, best first. A hit with score `MUST` always runs.
     pub fn resolve(&self, rel: &str) -> Vec<Hit> {
-        let Some(l) = lang(rel) else { return vec![] };
+        let Some(l) = lang(rel) else { return self.cover_data(rel) };
         if is_test(rel) {
-            return self.target(rel).map(|t| vec![Hit { target: t, show: rel.into(), why: "the test file itself".into(), score: usize::MAX }]).unwrap_or_default();
+            return self.target(rel).map(|t| vec![Hit { target: t, show: rel.into(), why: "the test file itself".into(), score: MUST }]).unwrap_or_default();
         }
         let mut hits = match l {
             "py" => self.cover_py(rel),
@@ -130,6 +139,16 @@ impl Repo<'_> {
                 Some(Target::Js { dir, tool, file })
             }
         }
+    }
+
+    /// A data file (a golden table, a fixture): the tests that name it.
+    fn cover_data(&self, rel: &str) -> Vec<Hit> {
+        let name = file_name(rel);
+        self.files
+            .iter()
+            .filter(|f| lang(f).is_some() && is_test(f) && self.read(f).contains(name))
+            .filter_map(|f| Some(Hit { target: self.target(f)?, show: f.clone(), why: format!("reads {name}"), score: MUST }))
+            .collect()
     }
 
     fn cover_py(&self, rel: &str) -> Vec<Hit> {
@@ -418,6 +437,16 @@ fn js_runner(root: &Path, file: &Path) -> Option<(PathBuf, &'static str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_files() {
+        assert!(is_data("agent/tests/number_capture_golden.jsonl"));
+        assert!(is_data("fixtures/call.yaml"));
+        assert!(!is_data("README.md"));
+        assert!(!is_data("uv.lock"));
+        assert!(!is_data("crates/x/Cargo.toml"));
+        assert!(!is_data("web/package.json"));
+    }
 
     #[test]
     fn counts_whole_words_only() {
