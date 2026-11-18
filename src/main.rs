@@ -6,6 +6,7 @@
 //!   t --dry <file>...      print the commands, run nothing
 //!   t <file> -- <args>     pass extra arguments to the test runner
 mod config;
+mod django;
 mod find;
 mod graph;
 
