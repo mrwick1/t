@@ -40,7 +40,7 @@ fn changed(root: &Path) -> Vec<String> {
     for out in [git(root, &["diff", "--name-only", &base]), git(root, &["ls-files", "--others", "--exclude-standard"])].into_iter().flatten() {
         files.extend(out.lines().map(str::to_string));
     }
-    files.into_iter().filter(|f| root.join(f).is_file() && find::lang(f).is_some()).collect()
+    files.into_iter().filter(|f| root.join(f).is_file() && (find::lang(f).is_some() || find::is_data(f))).collect()
 }
 
 fn relative(root: &Path, cwd: &Path, arg: &str) -> Option<String> {
@@ -233,7 +233,7 @@ fn main() -> ExitCode {
     let rels: Vec<String> = if inputs.is_empty() {
         let c = changed(&root);
         if c.is_empty() {
-            out!("t: no changed code files against the base branch");
+            out!("t: no changed code or data files against the base branch");
             return ExitCode::SUCCESS;
         }
         c
@@ -252,10 +252,19 @@ fn main() -> ExitCode {
     find::walk(&root, &root, &mut files);
     let repo = Repo { root: &root, files: &files };
 
-    // Take the best hit of each changed file first, then the next best, up to the limit.
+    // Changed tests and tests that read changed data always run. Then fill up to the limit:
+    // the best hit of each changed file first, then the next best.
     let per: Vec<(String, Vec<find::Hit>)> = rels.iter().map(|r| (r.clone(), repo.resolve(r))).collect();
     let mut chosen: Vec<(Target, String)> = Vec::new();
     let mut seen = BTreeSet::new();
+    for h in per.iter().flat_map(|(_, h)| h).filter(|h| h.score == find::MUST) {
+        if seen.insert(h.target.clone()) {
+            chosen.push((h.target.clone(), h.show.clone()));
+        }
+    }
+    if chosen.len() > max {
+        out!("t: {} changed or required tests exceed --max {max}; all of them run.", chosen.len());
+    }
     let deepest = per.iter().map(|(_, h)| h.len()).max().unwrap_or(0);
     for rank in 0..deepest {
         for (_, hits) in &per {
@@ -287,8 +296,13 @@ fn main() -> ExitCode {
             out!("  ... {skipped} more covering tests; CI runs them (or pass --max)");
         }
     }
-    if list || chosen.is_empty() {
+    if list {
         return ExitCode::SUCCESS;
+    }
+    if chosen.is_empty() {
+        // Not a pass: nothing ran.
+        out!("t: no test selected; nothing ran.");
+        return ExitCode::from(4);
     }
 
     if !dry {
