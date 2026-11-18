@@ -7,6 +7,7 @@
 //!   t <file> -- <args>     pass extra arguments to the test runner
 mod config;
 mod find;
+mod graph;
 
 use find::{Repo, Target};
 use std::collections::{BTreeMap, BTreeSet};
@@ -256,7 +257,8 @@ fn main() -> ExitCode {
 
     let mut files = Vec::new();
     find::walk(&root, &root, &mut files);
-    let repo = Repo { root: &root, files: &files };
+    let graph = graph::Graph::build(&root, &files, graph::cache_path(&root).as_deref());
+    let repo = Repo { root: &root, files: &files, graph: &graph };
 
     // Changed tests and tests that read changed data always run. Then fill up to the limit:
     // the best hit of each changed file first, then the next best.

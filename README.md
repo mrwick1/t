@@ -20,6 +20,8 @@ t <file> -- <args>     pass arguments to the test runner
 | Go | `go test ./<pkg>` | The tests of the same package |
 | TypeScript, JavaScript | vitest, jest or playwright from the nearest `package.json` | The test file next to it, and test files that import it |
 
+For Python and TypeScript/JavaScript, `t` also walks an import graph up to three imports away from the change. The graph resolves relative imports, tsconfig `paths`, jest `moduleNameMapper` aliases and `index` barrel files. `t --for` shows the chain, for example `imports src/components/index.ts → src/components/Button.tsx`. The parsed imports are cached in `~/.cache/t/` (or `$XDG_CACHE_HOME/t/`). `t` parses a file again only when its modification time changes.
+
 A test file whose name shares a distinctive word with the source file is added last.
 
 Python test files are `test_*.py`, `*_test.py`, `tests.py` and `*_tests.py`. A changed `conftest.py` runs the tests at or below it that use its fixtures. With an autouse fixture, it runs all of them.
