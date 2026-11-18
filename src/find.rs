@@ -68,6 +68,7 @@ fn stem(p: &str) -> &str {
 pub fn is_data(path: &str) -> bool {
     matches!(path.rsplit_once('.').map(|(_, e)| e), Some("json" | "jsonl" | "yaml" | "yml" | "toml" | "csv" | "tsv" | "txt" | "sql" | "html" | "xml" | "snap"))
         && !path.ends_with("Cargo.toml") && !path.ends_with("pyproject.toml") && !path.ends_with("package.json")
+        && !file_name(path).ends_with("-lock.json") && !file_name(path).starts_with("tsconfig")
 }
 
 pub fn is_test(path: &str) -> bool {
@@ -446,6 +447,11 @@ mod tests {
         assert!(!is_data("uv.lock"));
         assert!(!is_data("crates/x/Cargo.toml"));
         assert!(!is_data("web/package.json"));
+        assert!(!is_data("web/package-lock.json"));
+        assert!(!is_data("bun.lock"));
+        assert!(!is_data("deno.lock"));
+        assert!(!is_data("web/tsconfig.json"));
+        assert!(!is_data("tsconfig.base.json"));
     }
 
     #[test]
