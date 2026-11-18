@@ -22,11 +22,13 @@ t <file> -- <args>     pass arguments to the test runner
 
 A test file whose name shares a distinctive word with the source file is added last.
 
+Python test files are `test_*.py`, `*_test.py`, `tests.py` and `*_tests.py`. A changed `conftest.py` runs the tests at or below it that use its fixtures. With an autouse fixture, it runs all of them.
+
 A changed test file always runs, even past `--max`. A changed data file (`.json`, `.jsonl`, `.yaml`, `.csv` and similar) runs the tests that name it. When no test covers the change, `t` says so and exits with code 4, so "nothing ran" is never read as a pass.
 
 ## Hints
 
-After a failed run, `t` names a failure that comes from the environment: a missing Python package, a missing `node_modules` or a refused port. In a linked worktree, it names an `.env` file that the primary checkout has and the worktree lacks. It does not copy that file.
+After a failed run, `t` names a failure that comes from the environment: a missing Python package, a missing `node_modules`, a refused port, or Postgres out of lock slots or shared memory. In a linked worktree, it names an `.env` file that the primary checkout has and the worktree lacks. It does not copy that file.
 
 ## Settings
 

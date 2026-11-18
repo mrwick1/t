@@ -74,7 +74,7 @@ pub fn is_data(path: &str) -> bool {
 pub fn is_test(path: &str) -> bool {
     let n = file_name(path);
     match lang(path) {
-        Some("py") => n.starts_with("test_") || n.ends_with("_test.py"),
+        Some("py") => n.starts_with("test_") || n.ends_with("_test.py") || n == "tests.py" || n.ends_with("_tests.py"),
         Some("rs") => path.starts_with("tests/") || path.contains("/tests/") || n.ends_with("_tests.rs") || n == "tests.rs",
         Some("go") => n.ends_with("_test.go"),
         Some("js") => n.contains(".test.") || n.contains(".spec.") || path.contains("/__tests__/"),
@@ -114,6 +114,7 @@ impl Repo<'_> {
             return self.target(rel).map(|t| vec![Hit { target: t, show: rel.into(), why: "the test file itself".into(), score: MUST }]).unwrap_or_default();
         }
         let mut hits = match l {
+            "py" if file_name(rel) == "conftest.py" => self.cover_conftest(rel),
             "py" => self.cover_py(rel),
             "rs" => self.cover_rs(rel),
             "go" => self.cover_go(rel),
@@ -186,6 +187,40 @@ impl Repo<'_> {
         }
         self.add_named(rel, &mut hits, |f| f.ends_with(".py"));
         hits
+    }
+
+    /// A conftest.py: the tests at or below it that use its fixtures, or all of them for an autouse fixture.
+    fn cover_conftest(&self, rel: &str) -> Vec<Hit> {
+        let text = self.read(rel);
+        let (mut names, mut autouse) = (Vec::new(), false);
+        let mut lines = text.lines().map(str::trim);
+        while let Some(l) = lines.next() {
+            if !l.starts_with("@pytest.fixture") && !l.starts_with("@fixture") {
+                continue;
+            }
+            autouse |= l.contains("autouse=True");
+            for l in lines.by_ref() {
+                autouse |= l.contains("autouse=True");
+                if let Some(d) = l.trim_start_matches("async ").strip_prefix("def ") {
+                    names.push(d.split('(').next().unwrap_or("").trim().to_string());
+                    break;
+                }
+            }
+        }
+        let dir = rel.rsplit_once('/').map(|(d, _)| format!("{d}/")).unwrap_or_default();
+        self.files
+            .iter()
+            .filter(|f| f.starts_with(&dir) && f.ends_with(".py") && is_test(f))
+            .filter_map(|f| {
+                let t = self.read(f);
+                let used: Vec<&String> = names.iter().filter(|n| word_count(&t, n) > 0).collect();
+                if used.is_empty() && !autouse {
+                    return None;
+                }
+                let why = used.first().map(|n| format!("uses fixture {n}")).unwrap_or_else(|| "under an autouse fixture".into());
+                Some(Hit { target: Target::Py(f.clone()), show: f.clone(), why, score: 10 * used.len() + 1 })
+            })
+            .collect()
     }
 
     /// Test files whose name shares a distinctive word with the source file name.
@@ -470,6 +505,60 @@ mod tests {
         assert!(is_test("internal/auth/login_test.go"));
         assert!(is_test("src/lib/x.test.ts"));
         assert!(!is_test("src/lib/x.ts"));
+        assert!(is_test("billing/tests.py"));
+        assert!(is_test("billing/invoice_tests.py"));
+        assert!(!is_test("billing/tests/factories.py"));
+        assert!(!is_test("billing/conftest.py"));
+    }
+
+    /// A throwaway repo on disk: (relative path, contents) pairs.
+    pub fn fixture(name: &str, files: &[(&str, &str)]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("t-fixture-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (rel, text) in files {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        }
+        root
+    }
+
+    pub fn shows(root: &Path, rel: &str) -> Vec<String> {
+        let mut files = Vec::new();
+        walk(root, root, &mut files);
+        Repo { root, files: &files }.resolve(rel).into_iter().map(|h| h.show).collect()
+    }
+
+    #[test]
+    fn conftest_selects_tests_that_use_its_fixtures() {
+        let root = fixture("conftest", &[
+            ("billing/conftest.py", "import pytest\n\n@pytest.fixture\ndef invoice():\n    return 1\n"),
+            ("billing/test_a.py", "def test_a(invoice):\n    assert invoice\n"),
+            ("billing/sub/test_b.py", "def test_b(invoice):\n    assert invoice\n"),
+            ("billing/test_c.py", "def test_c():\n    assert True\n"),
+            ("other/test_d.py", "def test_d(invoice):\n    assert invoice\n"),
+        ]);
+        assert_eq!(shows(&root, "billing/conftest.py"), ["billing/sub/test_b.py", "billing/test_a.py"]);
+    }
+
+    #[test]
+    fn autouse_conftest_selects_every_test_below_it() {
+        let root = fixture("autouse", &[
+            ("billing/conftest.py", "import pytest\n\n@pytest.fixture(autouse=True)\ndef tenant():\n    yield\n"),
+            ("billing/test_a.py", "def test_a():\n    assert True\n"),
+            ("other/test_d.py", "def test_d():\n    assert True\n"),
+        ]);
+        assert_eq!(shows(&root, "billing/conftest.py"), ["billing/test_a.py"]);
+    }
+
+    #[test]
+    fn django_tests_py_imports_count() {
+        let root = fixture("django", &[
+            ("billing/__init__.py", ""),
+            ("billing/invoice.py", "def total():\n    return 1\n"),
+            ("billing/tests.py", "from billing.invoice import total\n"),
+        ]);
+        assert_eq!(shows(&root, "billing/invoice.py"), ["billing/tests.py"]);
     }
 }
 

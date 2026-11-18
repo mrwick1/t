@@ -135,6 +135,12 @@ fn diagnose(lines: &[String]) -> Option<String> {
             let m = l[i + 17..].split('\'').next().unwrap_or("");
             return Some(format!("Python package `{m}` is missing from this environment. Install the dependencies (for example `uv sync --all-packages`), then run t again."));
         }
+        if l.contains("out of shared memory") || l.contains("max_locks_per_transaction") {
+            return Some("Postgres ran out of lock slots, often while it creates the test database. Raise max_locks_per_transaction (for example to 256) in postgresql.conf, then restart Postgres.".into());
+        }
+        if l.contains("could not resize shared memory segment") {
+            return Some("Postgres has too little shared memory (/dev/shm). In Docker, raise shm_size (for example to 1g).".into());
+        }
         if l.contains("Cannot find module") || l.contains("ERR_MODULE_NOT_FOUND") || l.contains("command not found: vitest") {
             return Some("node_modules is missing or stale. Run the package install (for example `pnpm install`), then run t again.".into());
         }
@@ -346,6 +352,8 @@ mod tests {
         assert!(hint(&["E   ModuleNotFoundError: No module named 'fastapi'"]).unwrap().contains("`fastapi`"));
         assert!(hint(&["psycopg2.OperationalError: connection to server at \"localhost\" (127.0.0.1), port 5432 failed: Connection refused"]).unwrap().contains("port 5432"));
         assert!(hint(&["Error: Cannot find module 'vitest/config'"]).unwrap().contains("node_modules"));
+        assert!(hint(&["django.db.utils.OperationalError: out of shared memory", "HINT:  You might need to increase max_locks_per_transaction."]).unwrap().contains("max_locks_per_transaction"));
+        assert!(hint(&["ERROR:  could not resize shared memory segment \"/PostgreSQL.1\" to 1048576 bytes: No space left on device"]).unwrap().contains("shm"));
         assert_eq!(hint(&["AssertionError: assert 1 == 2"]), None);
     }
 }
