@@ -1,6 +1,6 @@
 # t
 
-`t` runs only the tests that cover a change. It is for coding agents and for people. CI runs the full suite.
+`t` runs only the tests that cover a change. It is for coding agents and for people. Leave the full suite to CI, or start it on purpose.
 
 ```
 t                      tests for the files changed against the base branch
@@ -22,6 +22,8 @@ t <file> -- <args>     pass arguments to the test runner
 
 A test file whose name shares a distinctive word with the source file is added last.
 
+A changed test file always runs, even past `--max`. A changed data file (`.json`, `.jsonl`, `.yaml`, `.csv` and similar) runs the tests that name it. When no test covers the change, `t` says so and exits with code 4, so "nothing ran" is never read as a pass.
+
 ## Hints
 
 After a failed run, `t` names a failure that comes from the environment: a missing Python package, a missing `node_modules` or a refused port. In a linked worktree, it names an `.env` file that the primary checkout has and the worktree lacks. It does not copy that file.
@@ -41,5 +43,5 @@ python = "uv run --all-packages pytest"
 ## Install
 
 ```
-cargo install --path . --locked
+cargo install --git https://github.com/mrwick1/t --locked
 ```
