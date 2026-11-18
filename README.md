@@ -22,6 +22,11 @@ t <file> -- <args>     pass arguments to the test runner
 
 For Python and TypeScript/JavaScript, `t` also walks an import graph up to three imports away from the change. The graph resolves relative imports, tsconfig `paths`, jest `moduleNameMapper` aliases and `index` barrel files. `t --for` shows the chain, for example `imports src/components/index.ts → src/components/Button.tsx`. The parsed imports are cached in `~/.cache/t/` (or `$XDG_CACHE_HOME/t/`). `t` parses a file again only when its modification time changes.
 
+For Django, `t` also follows two links that imports miss:
+
+- A view (or a module that a view file imports) runs the tests that request its URL. That is the URL name from `path(..., name=...)` or `router.register(...)` in quotes, such as `reverse("invoice-list")`, or the fixed start of the route, such as `"invoices/"`.
+- A module with `@receiver(..., sender=Model)` or `.connect(..., sender=Model)` runs the tests that use `Model`.
+
 A test file whose name shares a distinctive word with the source file is added last.
 
 Python test files are `test_*.py`, `*_test.py`, `tests.py` and `*_tests.py`. A changed `conftest.py` runs the tests at or below it that use its fixtures. With an autouse fixture, it runs all of them.

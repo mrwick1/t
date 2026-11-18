@@ -104,7 +104,7 @@ pub struct Repo<'a> {
 }
 
 impl Repo<'_> {
-    fn read(&self, rel: &str) -> String {
+    pub(crate) fn read(&self, rel: &str) -> String {
         std::fs::read_to_string(self.root.join(rel)).unwrap_or_default()
     }
 
@@ -123,6 +123,9 @@ impl Repo<'_> {
         };
         if matches!(l, "py" | "js") {
             self.add_graph(rel, &mut hits);
+        }
+        if l == "py" && file_name(rel) != "conftest.py" {
+            self.add_django(rel, &mut hits);
         }
         hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.show.cmp(&b.show)));
         hits
@@ -635,6 +638,42 @@ pub(crate) mod tests {
             ("src/checkout.test.ts", "jest.mock('~/lib/price');\nimport { x } from './lib/price';\n"),
         ]);
         assert_eq!(shows(&root, "src/lib/money.ts"), ["src/checkout.test.ts"]);
+    }
+
+    fn django_fixture(name: &str) -> PathBuf {
+        fixture(name, &[
+            ("billing/__init__.py", ""),
+            ("billing/models.py", "class Invoice:\n    pass\n"),
+            ("billing/views.py", "class InvoiceViewSet:\n    pass\n\ndef invoice_pdf(request, pk):\n    pass\n"),
+            ("billing/serializers.py", "class InvoiceSerializer:\n    pass\n"),
+            ("billing/api.py", "from billing.serializers import InvoiceSerializer\n\nclass InvoiceExport:\n    pass\n"),
+            ("billing/urls.py", "from django.urls import path\nfrom billing import views\nfrom billing.api import InvoiceExport\n\nrouter.register(r\"invoices\", views.InvoiceViewSet, basename=\"invoice\")\nurlpatterns = [\n    path(\n        \"invoices/<int:pk>/pdf/\",\n        views.invoice_pdf,\n        name=\"invoice-pdf\",\n    ),\n    path(\"export/\", InvoiceExport.as_view(), name=\"invoice-export\"),\n]\n"),
+            ("billing/signals.py", "from billing.models import Invoice\n\n@receiver(post_save, sender=Invoice)\ndef notify(sender, instance, **kw):\n    pass\n"),
+            ("tests/test_list.py", "def test_list(client):\n    client.get(reverse(\"invoice-list\"))\n"),
+            ("tests/test_pdf.py", "def test_pdf(client):\n    client.get(\"/api/invoices/3/pdf/\")\n"),
+            ("tests/test_ns.py", "def test_ns(client):\n    client.get(reverse('billing:invoice-pdf', args=[1]))\n"),
+            ("tests/test_export.py", "def test_export(client):\n    client.get(reverse(\"invoice-export\"))\n"),
+            ("tests/test_model.py", "from billing.models import Invoice\n"),
+            ("tests/test_other.py", "def test_other(client):\n    client.get(reverse(\"customer-list\"))\n"),
+        ])
+    }
+
+    #[test]
+    fn django_view_selects_tests_that_request_its_urls() {
+        let mut got = shows(&django_fixture("dj-views"), "billing/views.py");
+        got.sort();
+        assert_eq!(got, ["tests/test_list.py", "tests/test_ns.py", "tests/test_pdf.py"]);
+    }
+
+    #[test]
+    fn django_url_link_through_an_imported_module() {
+        let got = whys(&django_fixture("dj-ser"), "billing/serializers.py");
+        assert_eq!(got, [("tests/test_export.py".to_string(), "requests URL name \"invoice-export\" (billing/urls.py, through billing/api.py)".to_string())]);
+    }
+
+    #[test]
+    fn django_signal_selects_tests_that_use_its_sender() {
+        assert_eq!(shows(&django_fixture("dj-signals"), "billing/signals.py"), ["tests/test_model.py"]);
     }
 
     #[test]
