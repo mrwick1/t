@@ -1,0 +1,45 @@
+# t
+
+`t` runs only the tests that cover a change. It is for coding agents and for people. CI runs the full suite.
+
+```
+t                      tests for the files changed against the base branch
+t <file>...            a test file runs as is; a source file runs the tests that cover it
+t --for <file>...      list the covering tests and why; run nothing
+t --dry <file>...      print the commands; run nothing
+t --max N              run up to N test files (default 5)
+t <file> -- <args>     pass arguments to the test runner
+```
+
+## How it finds tests
+
+| Language | Runner | Covering tests |
+|---|---|---|
+| Python | `uv run pytest` (with `uv.lock`), `.venv/bin/pytest` or `python3 -m pytest` | Tests that import the module, then tests of the modules that import it |
+| Rust | `cargo test -p <crate>` | Tests in the file, `<name>_tests.rs`, and test files in the crate that name the module |
+| Go | `go test ./<pkg>` | The tests of the same package |
+| TypeScript, JavaScript | vitest, jest or playwright from the nearest `package.json` | The test file next to it, and test files that import it |
+
+A test file whose name shares a distinctive word with the source file is added last.
+
+## Hints
+
+After a failed run, `t` names a failure that comes from the environment: a missing Python package, a missing `node_modules` or a refused port. In a linked worktree, it names an `.env` file that the primary checkout has and the worktree lacks. It does not copy that file.
+
+## Settings
+
+A repo can add `.agents/test.toml`:
+
+```toml
+[env]
+PYTHONPATH = "{root}/shared"   # {root} is the repo root
+
+[runner]
+python = "uv run --all-packages pytest"
+```
+
+## Install
+
+```
+cargo install --path . --locked
+```

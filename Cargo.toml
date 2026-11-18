@@ -1,0 +1,14 @@
+[package]
+name = "t"
+version = "0.1.0"
+edition = "2021"
+description = "Run only the tests that cover a change."
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+
+[profile.release]
+opt-level = 3
+strip = true
