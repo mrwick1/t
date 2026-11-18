@@ -82,6 +82,26 @@ pub fn is_test(path: &str) -> bool {
     }
 }
 
+/// Match a path against a glob: `**` is any number of folders, `*` and `?` stay inside one name.
+pub fn glob(pat: &str, path: &str) -> bool {
+    fn names(p: &[&str], s: &[&str]) -> bool {
+        match p.first() {
+            None => s.is_empty(),
+            Some(&"**") => (0..=s.len()).any(|i| names(&p[1..], &s[i..])),
+            Some(x) => !s.is_empty() && name(x.as_bytes(), s[0].as_bytes()) && names(&p[1..], &s[1..]),
+        }
+    }
+    fn name(p: &[u8], s: &[u8]) -> bool {
+        match p.first() {
+            None => s.is_empty(),
+            Some(b'*') => (0..=s.len()).any(|i| name(&p[1..], &s[i..])),
+            Some(b'?') => !s.is_empty() && name(&p[1..], &s[1..]),
+            Some(c) => s.first() == Some(c) && name(&p[1..], &s[1..]),
+        }
+    }
+    names(&pat.split('/').collect::<Vec<_>>(), &path.split('/').collect::<Vec<_>>())
+}
+
 /// Count `needle` as a whole word: no identifier character on either side.
 pub fn word_count(hay: &str, needle: &str) -> usize {
     if needle.is_empty() {
@@ -126,6 +146,23 @@ impl Repo<'_> {
         }
         if l == "py" && file_name(rel) != "conftest.py" {
             self.add_django(rel, &mut hits);
+        }
+        hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.show.cmp(&b.show)));
+        hits
+    }
+
+    /// `resolve`, plus the tests that `[map]` rules in `.agents/test.toml` link to `rel`.
+    pub fn resolve_mapped(&self, rel: &str, map: &std::collections::BTreeMap<String, Vec<String>>) -> Vec<Hit> {
+        let mut hits = self.resolve(rel);
+        for (pat, tests) in map.iter().filter(|(p, _)| glob(p, rel)) {
+            for f in self.files.iter().filter(|f| is_test(f) && f.as_str() != rel && tests.iter().any(|t| glob(t, f))) {
+                let why = format!("mapped in .agents/test.toml by \"{pat}\"");
+                match hits.iter_mut().find(|h| h.show == *f) {
+                    Some(h) if h.score < 2000 => (h.score, h.why) = (2000, why),
+                    Some(_) => {}
+                    None => hits.extend(self.target(f).map(|t| Hit { target: t, show: f.clone(), why, score: 2000 })),
+                }
+            }
         }
         hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.show.cmp(&b.show)));
         hits
@@ -674,6 +711,34 @@ pub(crate) mod tests {
     #[test]
     fn django_signal_selects_tests_that_use_its_sender() {
         assert_eq!(shows(&django_fixture("dj-signals"), "billing/signals.py"), ["tests/test_model.py"]);
+    }
+
+    #[test]
+    fn globs() {
+        assert!(glob("rbac/catalog/**", "rbac/catalog/x/y.py"));
+        assert!(glob("rbac/catalog/**", "rbac/catalog/a.yaml"));
+        assert!(!glob("rbac/*.py", "rbac/a/b.py"));
+        assert!(glob("rbac/*.py", "rbac/b.py"));
+        assert!(glob("**/filters.py", "tenancy/filters.py"));
+        assert!(glob("**/filters.py", "filters.py"));
+        assert!(glob("core/**/tenant_*.py", "core/tenant_scope.py"));
+        assert!(!glob("core/**/tenant_*.py", "core/a/tenant/x.py"));
+    }
+
+    #[test]
+    fn map_rules_select_tests_for_any_file() {
+        let root = fixture("map", &[
+            ("rbac/catalog.yaml", "roles: []\n"),
+            ("tests/rbac/test_perms.py", "def test_p():\n    pass\n"),
+            ("tests/rbac/helpers.py", "X = 1\n"),
+            ("tests/test_other.py", "def test_o():\n    pass\n"),
+        ]);
+        let mut files = Vec::new();
+        walk(&root, &root, &mut files);
+        let graph = crate::graph::Graph::build(&root, &files, None);
+        let map = std::collections::BTreeMap::from([("rbac/**".to_string(), vec!["tests/rbac/**".to_string()])]);
+        let got: Vec<(String, String)> = Repo { root: &root, files: &files, graph: &graph }.resolve_mapped("rbac/catalog.yaml", &map).into_iter().map(|h| (h.show, h.why)).collect();
+        assert_eq!(got, [("tests/rbac/test_perms.py".to_string(), "mapped in .agents/test.toml by \"rbac/**\"".to_string())]);
     }
 
     #[test]

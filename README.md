@@ -47,7 +47,13 @@ PYTHONPATH = "{root}/shared"   # {root} is the repo root
 
 [runner]
 python = "uv run --all-packages pytest"
+
+[map]
+"rbac/catalog/**" = ["tests/rbac/**"]
+"**/tenant_filters.py" = ["tests/**/test_tenant_*.py"]
 ```
+
+`[map]` links files to tests when imports do not show the link. Each key is a glob of changed files. Its value lists globs of test files. `**` matches any number of folders. `*` and `?` match inside one name. A mapped test ranks above every other covering test. A changed file that a key matches counts as changed, even when it is not code or data.
 
 ## Install
 
