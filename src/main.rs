@@ -33,7 +33,7 @@ fn git(root: &Path, args: &[&str]) -> Option<String> {
 }
 
 /// Files changed against the base branch, plus untracked files.
-fn changed(root: &Path) -> Vec<String> {
+fn changed(root: &Path, map: &BTreeMap<String, Vec<String>>) -> Vec<String> {
     let base = ["origin/HEAD", "origin/main", "origin/master", "main", "master"]
         .iter()
         .find_map(|b| git(root, &["merge-base", "HEAD", b]))
@@ -42,7 +42,7 @@ fn changed(root: &Path) -> Vec<String> {
     for out in [git(root, &["diff", "--name-only", &base]), git(root, &["ls-files", "--others", "--exclude-standard"])].into_iter().flatten() {
         files.extend(out.lines().map(str::to_string));
     }
-    files.into_iter().filter(|f| root.join(f).is_file() && (find::lang(f).is_some() || find::is_data(f))).collect()
+    files.into_iter().filter(|f| root.join(f).is_file() && (find::lang(f).is_some() || find::is_data(f) || map.keys().any(|p| find::glob(p, f)))).collect()
 }
 
 fn relative(root: &Path, cwd: &Path, arg: &str) -> Option<String> {
@@ -239,7 +239,7 @@ fn main() -> ExitCode {
         }
     };
     let rels: Vec<String> = if inputs.is_empty() {
-        let c = changed(&root);
+        let c = changed(&root, &cfg.map);
         if c.is_empty() {
             out!("t: no changed code or data files against the base branch");
             return ExitCode::SUCCESS;
@@ -263,7 +263,7 @@ fn main() -> ExitCode {
 
     // Changed tests and tests that read changed data always run. Then fill up to the limit:
     // the best hit of each changed file first, then the next best.
-    let per: Vec<(String, Vec<find::Hit>)> = rels.iter().map(|r| (r.clone(), repo.resolve(r))).collect();
+    let per: Vec<(String, Vec<find::Hit>)> = rels.iter().map(|r| (r.clone(), repo.resolve_mapped(r, &cfg.map))).collect();
     let mut chosen: Vec<(Target, String)> = Vec::new();
     let mut seen = BTreeSet::new();
     for h in per.iter().flat_map(|(_, h)| h).filter(|h| h.score == find::MUST) {

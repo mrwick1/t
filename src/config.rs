@@ -6,6 +6,9 @@
 //!
 //! [runner]
 //! python = "uv run --no-sync pytest"        # replaces the detected command
+//!
+//! [map]                                      # links that imports do not show
+//! "rbac/catalog/**" = ["tests/rbac/**"]      # changed file glob = test file globs
 //! ```
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -17,6 +20,8 @@ pub struct Config {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub runner: BTreeMap<String, String>,
+    #[serde(default)]
+    pub map: BTreeMap<String, Vec<String>>,
 }
 
 impl Config {
@@ -29,5 +34,14 @@ impl Config {
             *v = v.replace("{root}", &r);
         }
         Ok(cfg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn reads_map() {
+        let cfg: super::Config = toml::from_str("[map]\n\"rbac/**\" = [\"tests/rbac/**\"]\n").unwrap();
+        assert_eq!(cfg.map["rbac/**"], ["tests/rbac/**"]);
     }
 }
