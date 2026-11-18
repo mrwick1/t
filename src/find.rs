@@ -100,6 +100,7 @@ pub fn word_count(hay: &str, needle: &str) -> usize {
 pub struct Repo<'a> {
     pub root: &'a Path,
     pub files: &'a [String],
+    pub graph: &'a crate::graph::Graph,
 }
 
 impl Repo<'_> {
@@ -120,6 +121,9 @@ impl Repo<'_> {
             "go" => self.cover_go(rel),
             _ => self.cover_js(rel),
         };
+        if matches!(l, "py" | "js") {
+            self.add_graph(rel, &mut hits);
+        }
         hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.show.cmp(&b.show)));
         hits
     }
@@ -187,6 +191,39 @@ impl Repo<'_> {
         }
         self.add_named(rel, &mut hits, |f| f.ends_with(".py"));
         hits
+    }
+
+    /// Tests up to three imports away, through the import graph, with the chain as the reason.
+    fn add_graph(&self, rel: &str, hits: &mut Vec<Hit>) {
+        let mut next_hop: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        let mut seen: std::collections::HashSet<&str> = [rel].into();
+        let mut frontier = vec![rel];
+        for score in [10, 2, 1] {
+            let mut next = Vec::new();
+            for node in frontier {
+                for f in self.graph.importers(node) {
+                    if !seen.insert(f) {
+                        continue;
+                    }
+                    next_hop.insert(f, node);
+                    if !is_test(f) {
+                        next.push(f.as_str());
+                        continue;
+                    }
+                    if hits.iter().any(|h| h.show == *f) {
+                        continue;
+                    }
+                    let mut chain = vec![node];
+                    while let Some(n) = next_hop.get(chain[chain.len() - 1]) {
+                        chain.push(n);
+                    }
+                    if let Some(t) = self.target(f) {
+                        hits.push(Hit { target: t, show: f.clone(), why: format!("imports {}", chain.join(" → ")), score });
+                    }
+                }
+            }
+            frontier = next;
+        }
     }
 
     /// A conftest.py: the tests at or below it that use its fixtures, or all of them for an autouse fixture.
@@ -471,7 +508,7 @@ fn js_runner(root: &Path, file: &Path) -> Option<(PathBuf, &'static str)> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -526,7 +563,8 @@ mod tests {
     pub fn shows(root: &Path, rel: &str) -> Vec<String> {
         let mut files = Vec::new();
         walk(root, root, &mut files);
-        Repo { root, files: &files }.resolve(rel).into_iter().map(|h| h.show).collect()
+        let graph = crate::graph::Graph::build(root, &files, None);
+        Repo { root, files: &files, graph: &graph }.resolve(rel).into_iter().map(|h| h.show).collect()
     }
 
     #[test]
@@ -549,6 +587,54 @@ mod tests {
             ("other/test_d.py", "def test_d():\n    assert True\n"),
         ]);
         assert_eq!(shows(&root, "billing/conftest.py"), ["billing/test_a.py"]);
+    }
+
+    pub fn whys(root: &Path, rel: &str) -> Vec<(String, String)> {
+        let mut files = Vec::new();
+        walk(root, root, &mut files);
+        let graph = crate::graph::Graph::build(root, &files, None);
+        Repo { root, files: &files, graph: &graph }.resolve(rel).into_iter().map(|h| (h.show, h.why)).collect()
+    }
+
+    #[test]
+    fn python_tests_three_imports_away() {
+        let root = fixture("py-deep", &[
+            ("api/__init__.py", ""),
+            ("api/urls.py", "from api import views\n"),
+            ("api/views.py", "from billing.tax import rate\n"),
+            ("billing/__init__.py", ""),
+            ("billing/tax.py", "def rate():\n    return 1\n"),
+            ("billing/invoice.py", "from .tax import rate\n"),
+            ("tests/test_api.py", "from api.urls import urlpatterns\n"),
+            ("tests/test_invoice.py", "from billing import invoice\n"),
+        ]);
+        let got = whys(&root, "billing/tax.py");
+        assert!(got.contains(&("tests/test_invoice.py".into(), "imports billing/invoice.py → billing/tax.py".into())), "{got:?}");
+        assert!(got.contains(&("tests/test_api.py".into(), "imports api/urls.py → api/views.py → billing/tax.py".into())), "{got:?}");
+    }
+
+    #[test]
+    fn js_alias_through_a_barrel() {
+        let root = fixture("js-barrel", &[
+            ("package.json", "{\"devDependencies\": {\"jest\": \"29\"}}"),
+            ("tsconfig.json", "{\n  // aliases\n  \"compilerOptions\": {\"baseUrl\": \".\", \"paths\": {\"@/*\": [\"./src/*\"],},},\n}"),
+            ("src/components/Button.tsx", "export const Button = () => null;\n"),
+            ("src/components/index.ts", "export { Button } from './Button';\n"),
+            ("src/pages/Home.test.tsx", "import { Button } from '@/components';\n"),
+        ]);
+        assert_eq!(whys(&root, "src/components/Button.tsx"), [("src/pages/Home.test.tsx".to_string(), "imports src/components/index.ts → src/components/Button.tsx".to_string())]);
+    }
+
+    #[test]
+    fn jest_module_name_mapper_alias() {
+        let root = fixture("js-mapper", &[
+            ("package.json", "{\"devDependencies\": {\"jest\": \"29\"}}"),
+            ("jest.config.js", "module.exports = {\n  moduleNameMapper: { '^~/(.*)$': '<rootDir>/src/$1' },\n};\n"),
+            ("src/lib/money.ts", "export const fmt = 1;\n"),
+            ("src/lib/price.ts", "import { fmt } from '~/lib/money';\n"),
+            ("src/checkout.test.ts", "jest.mock('~/lib/price');\nimport { x } from './lib/price';\n"),
+        ]);
+        assert_eq!(shows(&root, "src/lib/money.ts"), ["src/checkout.test.ts"]);
     }
 
     #[test]
