@@ -17,7 +17,7 @@ t <file> -- <args>     pass arguments to the test runner
 | Language | Runner | Covering tests |
 |---|---|---|
 | Python | `uv run pytest` (with `uv.lock`), `.venv/bin/pytest` or `python3 -m pytest` | Tests that import the module, then tests of the modules that import it |
-| Rust | `cargo test -p <crate>` | Tests in the file, `<name>_tests.rs`, and test files in the crate that name the module |
+| Rust | `cargo test -p <crate>` (`--lib` for library files) | Tests in the file, `<name>_tests.rs`, test files in the crate that name the module, then test files that name a module which names it |
 | Go | `go test ./<pkg>` | The tests of the same package |
 | TypeScript, JavaScript | vitest, jest or playwright from the nearest `package.json` | The test file next to it, and test files that import it |
 
@@ -28,7 +28,7 @@ For Django, `t` also follows two links that imports miss:
 - A view (or a module that a view file imports) runs the tests that request its URL. That is the URL name from `path(..., name=...)` or `router.register(...)` in quotes, such as `reverse("invoice-list")`, or the fixed start of the route, such as `"invoices/"`.
 - A module with `@receiver(..., sender=Model)` or `.connect(..., sender=Model)` runs the tests that use `Model`.
 
-A test file whose name shares a distinctive word with the source file is added last.
+A test file whose name shares a distinctive word with the source file is added last. For Rust, this happens only when no other test covers the file.
 
 Python test files are `test_*.py`, `*_test.py`, `tests.py` and `*_tests.py`. A changed `conftest.py` runs the tests at or below it that use its fixtures. With an autouse fixture, it runs all of them.
 

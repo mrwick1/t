@@ -77,12 +77,19 @@ fn jobs(root: &Path, cfg: &config::Config, targets: &[(Target, String)], extra: 
                 let top = f.split('/').next().unwrap_or("").to_string();
                 py.entry(top.clone()).or_default().push(f.clone());
             }
-            Target::Rust { ws, pkg, test_bin, filter } => {
+            Target::Rust { ws, pkg, test_bin, filter, lib } => {
+                let covered = targets.iter().any(|(u, _)| matches!(u, Target::Rust { ws: w, pkg: p, test_bin: b, filter: f, lib: l } if u != t && (w, p, b, l) == (ws, pkg, test_bin, lib) && filter.starts_with(f.as_str())));
+                if covered {
+                    continue;
+                }
                 let runner = cfg.runner.get("rust").map_or("cargo test", String::as_str);
                 let mut argv: Vec<String> = runner.split_whitespace().map(String::from).collect();
                 argv.extend(["-q", "-p", pkg].map(String::from));
                 if let Some(b) = test_bin {
                     argv.extend(["--test".into(), b.clone()]);
+                }
+                if *lib {
+                    argv.push("--lib".into());
                 }
                 if !filter.is_empty() {
                     argv.push(filter.clone());
@@ -137,7 +144,7 @@ fn jobs(root: &Path, cfg: &config::Config, targets: &[(Target, String)], extra: 
 fn named_job(root: &Path, cfg: &config::Config, t: Target, name: &str, extra: &[String]) -> Job {
     let (t, mut args) = match t {
         Target::Py(f) => (Target::Py(format!("{f}::{name}")), vec![]),
-        Target::Rust { ws, pkg, test_bin, filter } => (Target::Rust { ws, pkg, test_bin, filter: format!("{filter}{name}") }, vec![]),
+        Target::Rust { ws, pkg, test_bin, filter, lib } => (Target::Rust { ws, pkg, test_bin, filter: format!("{filter}{name}"), lib }, vec![]),
         Target::Go { .. } => (t, vec!["-run".into(), format!("^{name}$")]),
         Target::Js { tool, .. } => (t, vec![if tool == "playwright" { "-g" } else { "-t" }.into(), name.into()]),
     };
@@ -410,7 +417,19 @@ mod tests {
     use std::path::Path;
 
     fn rs(filter: &str) -> Target {
-        Target::Rust { ws: "/r".into(), pkg: "p".into(), test_bin: None, filter: filter.into() }
+        Target::Rust { ws: "/r".into(), pkg: "p".into(), test_bin: None, filter: filter.into(), lib: false }
+    }
+
+    #[test]
+    fn skips_a_rust_filter_that_another_filter_covers() {
+        let j = jobs(Path::new("/r"), &config::Config::default(), &[(rs("a::"), String::new()), (rs("a::tests::"), String::new()), (rs("b::"), String::new())], &[]);
+        assert_eq!(j.iter().map(|j| j.argv.last().unwrap().as_str()).collect::<Vec<_>>(), ["a::", "b::"]);
+    }
+
+    #[test]
+    fn passes_lib_for_library_files() {
+        let t = Target::Rust { ws: "/r".into(), pkg: "p".into(), test_bin: None, filter: "m::".into(), lib: true };
+        assert_eq!(jobs(Path::new("/r"), &config::Config::default(), &[(t, String::new())], &[])[0].argv, ["cargo", "test", "-q", "-p", "p", "--lib", "m::"]);
     }
 
     #[test]
