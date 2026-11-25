@@ -6,6 +6,7 @@
 t                      tests for the files changed against the base branch
 t <file>...            a test file runs as is; a source file runs the tests that cover it
 t <file>::<name>       one named test in a test file
+t <folder>[::<name>]   the tests in a folder or crate, or the ones that match the name
 t --for <file>...      list the covering tests and why; run nothing
 t --dry <file>...      print the commands; run nothing
 t --max N              run up to N test files (default 5)
@@ -56,6 +57,8 @@ rust = "cargo test --locked"
 ```
 
 `[runner]` replaces the detected command: `python` for pytest, `rust` for `cargo test`.
+
+`t <folder>` runs the tests in a folder. A Rust crate folder or its `src/` runs the library tests of the crate (`cargo test -p <crate> --lib`), and a module folder runs that module. A Python, Go or JS folder runs its test files. `t <folder>::<name>` adds the name as a filter: the Rust filter, pytest `-k`, Go `-run`, or a vitest, jest or playwright title.
 
 `t <file>::<name>` runs one test. The name is a pytest node name, a Rust test path inside the file's module, a Go test name, or a vitest, jest or playwright test title.
 

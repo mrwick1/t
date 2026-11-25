@@ -3,6 +3,7 @@
 //!   t                      tests for the files changed against the base branch
 //!   t <file>...            a test file runs as is; a source file runs the tests that cover it
 //!   t <file>::<name>       one named test in a test file
+//!   t <folder>[::<name>]   the tests in a folder or crate, or the ones that match the name
 //!   t --for <file>...      list the covering tests, run nothing
 //!   t --dry <file>...      print the commands, run nothing
 //!   t <file> -- <args>     pass extra arguments to the test runner
@@ -26,7 +27,7 @@ macro_rules! out {
     }};
 }
 
-const USAGE: &str = "usage: t [--for] [--dry] [--max N] [file[::test]...] [-- runner args]";
+const USAGE: &str = "usage: t [--for] [--dry] [--max N] [file|folder[::test]...] [-- runner args]";
 
 fn git(root: &Path, args: &[&str]) -> Option<String> {
     let out = Command::new("git").arg("-C").arg(root).args(args).output().ok()?;
@@ -140,9 +141,10 @@ fn jobs(root: &Path, cfg: &config::Config, targets: &[(Target, String)], extra: 
     out
 }
 
-/// The job for one named test in a test file: `<file>::<name>`.
+/// The job for the tests named `name` in a test file or folder: `<path>::<name>`.
 fn named_job(root: &Path, cfg: &config::Config, t: Target, name: &str, extra: &[String]) -> Job {
     let (t, mut args) = match t {
+        Target::Py(f) if !f.ends_with(".py") => (Target::Py(f), vec!["-k".into(), name.into()]),
         Target::Py(f) => (Target::Py(format!("{f}::{name}")), vec![]),
         Target::Rust { ws, pkg, test_bin, filter, lib } => (Target::Rust { ws, pkg, test_bin, filter: format!("{filter}{name}"), lib }, vec![]),
         Target::Go { .. } => (t, vec!["-run".into(), format!("^{name}$")]),
@@ -280,14 +282,14 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    // `<file>::<name>` names one test in a test file.
-    let mut named = Vec::new();
-    inputs.retain(|a| match a.split_once("::").and_then(|(f, n)| Some((relative(&root, &cwd, f)?, n))) {
-        Some((rel, n)) => {
-            named.push((rel, n.to_string()));
-            false
-        }
-        None => true,
+    // `<file>::<name>` names one test in a test file; a folder runs its tests, `<folder>::<name>` the matching ones.
+    let mut named: Vec<(String, Option<String>)> = Vec::new();
+    inputs.retain(|a| {
+        let pick = match a.split_once("::") {
+            Some((f, n)) => relative(&root, &cwd, f).map(|r| (r, Some(n.to_string()))),
+            None => relative(&root, &cwd, a).filter(|r| root.join(r).is_dir()).map(|r| (r, None)),
+        };
+        pick.map(|p| named.push(p)).is_none()
     });
     let rels: Vec<String> = if inputs.is_empty() && named.is_empty() {
         let c = changed(&root, &cfg.map);
@@ -358,13 +360,18 @@ fn main() -> ExitCode {
     }
     let mut todo = Vec::new();
     for (rel, name) in named {
-        match repo.target(&rel) {
-            Some(t) => {
+        let t = if rel.is_empty() { None } else { repo.target(&rel) };
+        match (t, name) {
+            (Some(t), Some(name)) => {
                 out!("{rel}::{name}:\n  run   {rel}::{name}  (named test)");
                 todo.push(named_job(&root, &cfg, t, &name, &extra));
             }
-            None => {
-                eprintln!("t: {rel} holds no tests that t can run");
+            (Some(t), None) => {
+                out!("{rel}:\n  run   {rel}  (the tests in this folder)");
+                todo.extend(jobs(&root, &cfg, &[(t, String::new())], &extra));
+            }
+            (None, _) => {
+                eprintln!("t: {} is not a test file, a crate, a module folder or a folder of tests", if rel.is_empty() { "the repo root" } else { &rel });
                 return ExitCode::from(2);
             }
         }
@@ -448,6 +455,7 @@ mod tests {
         assert_eq!(one(Target::Go { module: "/r".into(), pkg: "./x".into() }), ["go", "test", "./x", "-run", "^it_works$"]);
         assert_eq!(one(Target::Js { dir: "/r".into(), tool: "vitest", file: "a.test.ts".into() }), ["npx", "vitest", "run", "a.test.ts", "-t", "it_works"]);
         assert_eq!(one(Target::Js { dir: "/r".into(), tool: "playwright", file: "a.spec.ts".into() })[4..], ["-g", "it_works"]);
+        assert_eq!(one(Target::Py("api/tests".into()))[5..], ["api/tests", "-k", "it_works"]);
     }
 
     fn hint(lines: &[&str]) -> Option<String> {

@@ -169,8 +169,11 @@ impl Repo<'_> {
         hits
     }
 
-    /// How to run one test file (or a Rust file that holds tests).
+    /// How to run one test file (or a Rust file that holds tests), or the tests in a folder.
     pub fn target(&self, rel: &str) -> Option<Target> {
+        if self.root.join(rel).is_dir() {
+            return self.folder_target(rel);
+        }
         match lang(rel)? {
             "py" => Some(Target::Py(rel.into())),
             "rs" => self.rust_target(rel),
@@ -184,6 +187,29 @@ impl Repo<'_> {
                 let (dir, tool) = js_runner(self.root, &abs)?;
                 let file = abs.strip_prefix(&dir).ok()?.to_string_lossy().to_string();
                 Some(Target::Js { dir, tool, file })
+            }
+        }
+    }
+
+    /// A folder: a Rust crate or module folder, or a folder of Python, Go or JS tests.
+    fn folder_target(&self, rel: &str) -> Option<Target> {
+        let abs = self.root.join(rel);
+        if let Some((crate_dir, pkg)) = rust_crate(self.root, &abs.join("Cargo.toml")) {
+            // A module folder runs like its module file; the crate root and src/ run the whole library.
+            return match abs.strip_prefix(&crate_dir).ok()?.to_str()? {
+                "" | "src" => Some(Target::Rust { ws: workspace_root(self.root, &crate_dir), pkg, test_bin: None, filter: String::new(), lib: crate_dir.join("src/lib.rs").exists() }),
+                "tests" => Some(Target::Rust { ws: workspace_root(self.root, &crate_dir), pkg, test_bin: Some("*".into()), filter: String::new(), lib: false }),
+                _ => self.rust_target(&format!("{rel}.rs")),
+            };
+        }
+        let dir = format!("{rel}/");
+        let first = self.files.iter().find(|f| f.starts_with(&dir) && is_test(f))?;
+        match lang(first)? {
+            "py" => Some(Target::Py(rel.into())),
+            "go" => self.target(&format!("{rel}/_.go")),
+            _ => {
+                let (dir, tool) = js_runner(self.root, &abs.join("_"))?;
+                Some(Target::Js { dir: dir.clone(), tool, file: abs.strip_prefix(&dir).ok()?.to_string_lossy().to_string() })
             }
         }
     }
@@ -828,6 +854,30 @@ mod refs {
         ]);
         let got = super::tests::whys(&root, "src/browser_dom.rs");
         assert_eq!(got, [("src/browser_query_tests.rs".to_string(), "names browser_query, which names browser_dom".to_string())]);
+    }
+
+    #[test]
+    fn folders_are_targets() {
+        use super::*;
+        let root = super::tests::fixture("dirs", &[
+            ("Cargo.lock", ""),
+            ("crates/x/Cargo.toml", "[package]\nname = \"x\"\n"),
+            ("crates/x/src/lib.rs", "pub mod css;\n"),
+            ("crates/x/src/css/mod.rs", "#[test]\nfn t() {}\n"),
+            ("crates/x/tests/a.rs", "#[test]\nfn t() {}\n"),
+            ("api/tests/test_a.py", "def test_a():\n    pass\n"),
+        ]);
+        let mut files = Vec::new();
+        walk(&root, &root, &mut files);
+        let graph = crate::graph::Graph::build(&root, &files, None);
+        let repo = Repo { root: &root, files: &files, graph: &graph };
+        let rust = |f: &str, want: &str| matches!(repo.target(f), Some(Target::Rust { filter, lib: true, .. }) if filter == want);
+        assert!(rust("crates/x", ""));
+        assert!(rust("crates/x/src", ""));
+        assert!(rust("crates/x/src/css", "css::"));
+        assert!(matches!(repo.target("crates/x/tests"), Some(Target::Rust { test_bin: Some(b), lib: false, .. }) if b == "*"));
+        assert_eq!(repo.target("api/tests"), Some(Target::Py("api/tests".into())));
+        assert_eq!(repo.target("crates"), None);
     }
 
     #[test]
