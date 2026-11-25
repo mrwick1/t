@@ -373,7 +373,9 @@ impl Repo<'_> {
         if s == "mod" {
             s = abs.parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         }
-        if own.contains("#[test]") || own.contains("::test]") || own.contains("#[cfg(test)]") {
+        // A crate root only declares the test modules of other files; count its own tests only.
+        let root_file = matches!(s.as_str(), "lib" | "main");
+        if own.contains("#[test]") || own.contains("::test]") || !root_file && own.contains("#[cfg(test)]") {
             if let Some(t) = self.rust_target(rel) {
                 hits.push(Hit { target: t, show: rel.into(), why: "holds its own tests".into(), score: 1000 });
             }
@@ -762,5 +764,16 @@ mod refs {
         assert_eq!(py_refs("from agent import pipeline, flow\n", "agent.pipeline"), 1);
         assert_eq!(py_refs("monkeypatch.setattr('agent.pipeline.x', 1)\n", "agent.pipeline"), 1);
         assert_eq!(py_refs("from agent import pipeline_handlers\n", "agent.pipeline"), 0);
+    }
+
+    #[test]
+    fn lib_rs_that_only_declares_test_modules_holds_no_tests() {
+        let root = super::tests::fixture("rs-lib", &[
+            ("Cargo.toml", "[package]\nname = \"x\"\n"),
+            ("src/lib.rs", "pub mod dom;\n#[cfg(test)]\nmod dom_tests;\n"),
+            ("src/dom.rs", "pub fn f() {}\n"),
+            ("src/dom_tests.rs", "#[test]\nfn a() { crate::dom::f() }\n"),
+        ]);
+        assert!(!super::tests::shows(&root, "src/lib.rs").contains(&"src/lib.rs".to_string()));
     }
 }

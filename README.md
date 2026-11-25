@@ -32,7 +32,7 @@ A test file whose name shares a distinctive word with the source file is added l
 
 Python test files are `test_*.py`, `*_test.py`, `tests.py` and `*_tests.py`. A changed `conftest.py` runs the tests at or below it that use its fixtures. With an autouse fixture, it runs all of them.
 
-A changed test file always runs, even past `--max`. A changed data file (`.json`, `.jsonl`, `.yaml`, `.csv` and similar) runs the tests that name it. When no test covers the change, `t` says so and exits with code 4, so "nothing ran" is never read as a pass.
+A changed test file always runs, even past `--max`. A changed data file (`.json`, `.jsonl`, `.yaml`, `.csv` and similar) runs the tests that name it. When no test covers the change, `t` says so and exits with code 4, so "nothing ran" is never read as a pass. A run that passes but runs no test, for example a test name that matches nothing, also exits with code 4.
 
 ## Hints
 
