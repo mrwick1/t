@@ -6,7 +6,8 @@ pub enum Target {
     /// pytest file, relative to the repo root.
     Py(String),
     /// cargo test in `ws` (workspace root): package, then `--test <name>` or a name filter.
-    Rust { ws: PathBuf, pkg: String, test_bin: Option<String>, filter: String },
+    /// `lib`: the file belongs to the library, so `--lib` skips the doc tests and the `tests/` binaries.
+    Rust { ws: PathBuf, pkg: String, test_bin: Option<String>, filter: String, lib: bool },
     /// go test package path such as `./internal/auth`, run in the module root.
     Go { module: PathBuf, pkg: String },
     /// vitest, jest or playwright file, relative to the package dir that owns the runner.
@@ -327,10 +328,16 @@ impl Repo<'_> {
         let in_crate = abs.strip_prefix(&crate_dir).ok()?.to_string_lossy().to_string();
         if let Some(rest) = in_crate.strip_prefix("tests/") {
             let bin = rest.split('/').next()?.trim_end_matches(".rs").to_string();
-            return Some(Target::Rust { ws, pkg, test_bin: Some(bin), filter: String::new() });
+            return Some(Target::Rust { ws, pkg, test_bin: Some(bin), filter: String::new(), lib: false });
         }
         let filter = self.rust_modpath(&crate_dir, &in_crate);
-        Some(Target::Rust { ws, pkg, test_bin: None, filter: if filter.is_empty() { filter } else { format!("{filter}::") } })
+        // A crate with lib.rs and main.rs: main.rs, src/bin/ and the modules main.rs declares are not in the library.
+        let main = std::fs::read_to_string(crate_dir.join("src/main.rs")).unwrap_or_default();
+        let lib = crate_dir.join("src/lib.rs").exists()
+            && in_crate != "src/main.rs"
+            && !in_crate.starts_with("src/bin/")
+            && !main.lines().any(|l| l.trim_start().trim_start_matches("pub ").strip_prefix("mod ").is_some_and(|m| m.trim_end_matches([';', '{', ' ']) == stem(&in_crate)));
+        Some(Target::Rust { ws, pkg, test_bin: None, filter: if filter.is_empty() { filter } else { format!("{filter}::") }, lib })
     }
 
     /// The module path of a file under `src/`, with `#[path]` includes resolved.
@@ -397,13 +404,44 @@ impl Repo<'_> {
                     target: t,
                     show: f.clone(),
                     why: if sibling { format!("test file for {s}") } else { format!("names {s}") },
-                    score: n + if sibling { 500 } else { 0 },
+                    score: 100 + n + if sibling { 500 } else { 0 },
                 });
             }
         }
-        let crate_files = |f: &str| f.starts_with(&prefix) && f.ends_with(".rs");
-        self.add_named(rel, &mut hits, crate_files);
+        self.add_rust_hop(rel, &s, &prefix, &mut hits);
+        if hits.is_empty() {
+            let crate_files = |f: &str| f.starts_with(&prefix) && f.ends_with(".rs");
+            self.add_named(rel, &mut hits, crate_files);
+        }
         hits
+    }
+
+    /// Test files in the crate that name a module which names the changed module `s`.
+    fn add_rust_hop(&self, rel: &str, s: &str, prefix: &str, hits: &mut Vec<Hit>) {
+        let module = |f: &str| match stem(f) {
+            "mod" => f.rsplit('/').nth(1).unwrap_or("").to_string(),
+            n => n.to_string(),
+        };
+        let texts: Vec<(&String, String)> = self.files.iter().filter(|f| f.starts_with(prefix) && f.ends_with(".rs") && f.as_str() != rel).map(|f| (f, self.read(f))).collect();
+        // A `mod x;` line only declares a module; it does not use it.
+        let words = |t: &str| t.lines().filter(|l| !l.trim_start().trim_start_matches("pub ").trim_start_matches("pub(crate) ").starts_with("mod ")).flat_map(|l| l.split(|c: char| !c.is_alphanumeric() && c != '_').filter(|w| !w.is_empty()).map(str::to_string).collect::<Vec<_>>()).collect::<std::collections::HashSet<String>>();
+        let sets: Vec<(&String, std::collections::HashSet<String>)> = texts.iter().map(|(f, t)| (*f, words(t))).collect();
+        let near: Vec<String> = sets.iter().filter(|(f, w)| !is_test(f) && !matches!(stem(f), "lib" | "main") && w.contains(s)).map(|(f, _)| module(f)).filter(|m| m != s).collect();
+        // A module that many tests name (a hub) says less than one that few tests name.
+        let tests: Vec<&(&String, std::collections::HashSet<String>)> = sets.iter().filter(|(f, _)| is_test(f)).collect();
+        let fan = |m: &String| tests.iter().filter(|(_, w)| w.contains(m)).count();
+        let mut near: Vec<(String, usize)> = near.into_iter().map(|m| (fan(&m), m)).map(|(n, m)| (m, n)).collect();
+        near.sort_by_key(|(_, n)| *n);
+        for (f, w) in tests {
+            if hits.iter().any(|h| h.show == **f) {
+                continue;
+            }
+            if let Some((m, n)) = near.iter().find(|(m, _)| w.contains(m)) {
+                if let Some(t) = self.target(f) {
+                    hits.push(Hit { target: t, show: (*f).clone(), why: format!("names {m}, which names {s}"), score: 100 - n.min(&99) });
+                }
+            }
+        }
     }
 
     fn cover_go(&self, rel: &str) -> Vec<Hit> {
@@ -775,5 +813,40 @@ mod refs {
             ("src/dom_tests.rs", "#[test]\nfn a() { crate::dom::f() }\n"),
         ]);
         assert!(!super::tests::shows(&root, "src/lib.rs").contains(&"src/lib.rs".to_string()));
+    }
+
+    #[test]
+    fn rust_tests_two_modules_away_beat_shared_name_words() {
+        let root = super::tests::fixture("rs-hop", &[
+            ("Cargo.toml", "[package]\nname = \"x\"\n"),
+            ("src/lib.rs", "pub mod browser_dom;\npub mod browser_query;\n"),
+            ("src/browser_dom.rs", "pub struct Node;\n"),
+            ("src/browser_query.rs", "use crate::browser_dom::Node;\n"),
+            ("src/browser_query_tests.rs", "use crate::browser_query::find;\n#[test]\nfn a() {}\n"),
+            ("src/browser_abort_tests.rs", "use crate::browser::x;\n#[test]\nfn a() {}\n"),
+            ("src/browser.rs", "mod browser_dom;\npub fn x() {}\n"),
+        ]);
+        let got = super::tests::whys(&root, "src/browser_dom.rs");
+        assert_eq!(got, [("src/browser_query_tests.rs".to_string(), "names browser_query, which names browser_dom".to_string())]);
+    }
+
+    #[test]
+    fn rust_src_files_run_only_the_library_tests() {
+        use super::*;
+        let root = super::tests::fixture("rs-lib-flag", &[
+            ("Cargo.toml", "[package]\nname = \"x\"\n"),
+            ("src/lib.rs", "pub mod a;\n"),
+            ("src/main.rs", "mod cli;\nfn main() {}\n"),
+            ("src/a.rs", "#[test]\nfn t() {}\n"),
+            ("src/cli.rs", "#[test]\nfn t() {}\n"),
+        ]);
+        let mut files = Vec::new();
+        walk(&root, &root, &mut files);
+        let graph = crate::graph::Graph::build(&root, &files, None);
+        let repo = Repo { root: &root, files: &files, graph: &graph };
+        let lib = |f: &str| matches!(repo.target(f), Some(Target::Rust { lib, .. }) if lib);
+        assert!(lib("src/a.rs"));
+        assert!(!lib("src/cli.rs"));
+        assert!(!lib("src/main.rs"));
     }
 }
