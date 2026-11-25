@@ -408,7 +408,7 @@ impl Repo<'_> {
         }
         // A crate root only declares the test modules of other files; count its own tests only.
         let root_file = matches!(s.as_str(), "lib" | "main");
-        if own.contains("#[test]") || own.contains("::test]") || !root_file && own.contains("#[cfg(test)]") {
+        if own.contains("#[test]") || own.contains("::test]") || !root_file && cfg_test_mod(&own) {
             if let Some(t) = self.rust_target(rel) {
                 hits.push(Hit { target: t, show: rel.into(), why: "holds its own tests".into(), score: 1000 });
             }
@@ -611,6 +611,18 @@ fn js_runner(root: &Path, file: &Path) -> Option<(PathBuf, &'static str)> {
         d = dir.parent();
     }
     None
+}
+
+/// A `#[cfg(test)]` that marks a module (its tests may live in another file). A `#[cfg(test)]` helper item holds no test.
+fn cfg_test_mod(src: &str) -> bool {
+    src.match_indices("#[cfg(test)]").any(|(i, m)| {
+        let mut rest = src[i + m.len()..].trim_start();
+        while rest.starts_with("#[") {
+            let Some(end) = rest.find(']') else { return false };
+            rest = rest[end + 1..].trim_start();
+        }
+        rest.strip_prefix("pub(crate) ").or_else(|| rest.strip_prefix("pub ")).unwrap_or(rest).starts_with("mod ")
+    })
 }
 
 #[cfg(test)]
@@ -839,6 +851,18 @@ mod refs {
             ("src/dom_tests.rs", "#[test]\nfn a() { crate::dom::f() }\n"),
         ]);
         assert!(!super::tests::shows(&root, "src/lib.rs").contains(&"src/lib.rs".to_string()));
+    }
+
+    #[test]
+    fn cfg_test_helpers_without_test_functions_hold_no_tests() {
+        let root = super::tests::fixture("rs-cfg-helper", &[
+            ("Cargo.toml", "[package]\nname = \"x\"\n"),
+            ("src/lib.rs", "pub mod a;\npub mod b;\n"),
+            ("src/a.rs", "pub fn f() {}\n#[cfg(test)]\npub(crate) fn helper() {}\n"),
+            ("src/b.rs", "pub fn f() {}\n#[cfg(test)]\n#[path = \"b_inner.rs\"]\nmod tests;\n"),
+        ]);
+        assert!(!super::tests::shows(&root, "src/a.rs").contains(&"src/a.rs".to_string()));
+        assert!(super::tests::shows(&root, "src/b.rs").contains(&"src/b.rs".to_string()));
     }
 
     #[test]
