@@ -5,6 +5,7 @@
 ```
 t                      tests for the files changed against the base branch
 t <file>...            a test file runs as is; a source file runs the tests that cover it
+t <file>::<name>       one named test in a test file
 t --for <file>...      list the covering tests and why; run nothing
 t --dry <file>...      print the commands; run nothing
 t --max N              run up to N test files (default 5)
@@ -47,11 +48,16 @@ PYTHONPATH = "{root}/shared"   # {root} is the repo root
 
 [runner]
 python = "uv run --all-packages pytest"
+rust = "cargo test --locked"
 
 [map]
 "rbac/catalog/**" = ["tests/rbac/**"]
 "**/tenant_filters.py" = ["tests/**/test_tenant_*.py"]
 ```
+
+`[runner]` replaces the detected command: `python` for pytest, `rust` for `cargo test`.
+
+`t <file>::<name>` runs one test. The name is a pytest node name, a Rust test path inside the file's module, a Go test name, or a vitest, jest or playwright test title.
 
 `[map]` links files to tests when imports do not show the link. Each key is a glob of changed files. Its value lists globs of test files. `**` matches any number of folders. `*` and `?` match inside one name. A mapped test ranks above every other covering test. A changed file that a key matches counts as changed, even when it is not code or data.
 

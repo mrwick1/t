@@ -2,6 +2,7 @@
 //!
 //!   t                      tests for the files changed against the base branch
 //!   t <file>...            a test file runs as is; a source file runs the tests that cover it
+//!   t <file>::<name>       one named test in a test file
 //!   t --for <file>...      list the covering tests, run nothing
 //!   t --dry <file>...      print the commands, run nothing
 //!   t <file> -- <args>     pass extra arguments to the test runner
@@ -25,7 +26,7 @@ macro_rules! out {
     }};
 }
 
-const USAGE: &str = "usage: t [--for] [--dry] [--max N] [file...] [-- runner args]";
+const USAGE: &str = "usage: t [--for] [--dry] [--max N] [file[::test]...] [-- runner args]";
 
 fn git(root: &Path, args: &[&str]) -> Option<String> {
     let out = Command::new("git").arg("-C").arg(root).args(args).output().ok()?;
@@ -77,7 +78,9 @@ fn jobs(root: &Path, cfg: &config::Config, targets: &[(Target, String)], extra: 
                 py.entry(top.clone()).or_default().push(f.clone());
             }
             Target::Rust { ws, pkg, test_bin, filter } => {
-                let mut argv: Vec<String> = ["cargo", "test", "-q", "-p", pkg].map(String::from).to_vec();
+                let runner = cfg.runner.get("rust").map_or("cargo test", String::as_str);
+                let mut argv: Vec<String> = runner.split_whitespace().map(String::from).collect();
+                argv.extend(["-q", "-p", pkg].map(String::from));
                 if let Some(b) = test_bin {
                     argv.extend(["--test".into(), b.clone()]);
                 }
@@ -128,6 +131,18 @@ fn jobs(root: &Path, cfg: &config::Config, targets: &[(Target, String)], extra: 
         out.push(Job { cwd: dir, argv});
     }
     out
+}
+
+/// The job for one named test in a test file: `<file>::<name>`.
+fn named_job(root: &Path, cfg: &config::Config, t: Target, name: &str, extra: &[String]) -> Job {
+    let (t, mut args) = match t {
+        Target::Py(f) => (Target::Py(format!("{f}::{name}")), vec![]),
+        Target::Rust { ws, pkg, test_bin, filter } => (Target::Rust { ws, pkg, test_bin, filter: format!("{filter}{name}") }, vec![]),
+        Target::Go { .. } => (t, vec!["-run".into(), format!("^{name}$")]),
+        Target::Js { tool, .. } => (t, vec![if tool == "playwright" { "-g" } else { "-t" }.into(), name.into()]),
+    };
+    args.extend(extra.iter().cloned());
+    jobs(root, cfg, &[(t, String::new())], &args).remove(0)
 }
 
 /// One hint for a failure that comes from the environment, not from the code.
@@ -238,7 +253,16 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let rels: Vec<String> = if inputs.is_empty() {
+    // `<file>::<name>` names one test in a test file.
+    let mut named = Vec::new();
+    inputs.retain(|a| match a.split_once("::").and_then(|(f, n)| Some((relative(&root, &cwd, f)?, n))) {
+        Some((rel, n)) => {
+            named.push((rel, n.to_string()));
+            false
+        }
+        None => true,
+    });
+    let rels: Vec<String> = if inputs.is_empty() && named.is_empty() {
         let c = changed(&root, &cfg.map);
         if c.is_empty() {
             out!("t: no changed code or data files against the base branch");
@@ -305,10 +329,23 @@ fn main() -> ExitCode {
             out!("  ... {skipped} more covering tests; CI runs them (or pass --max)");
         }
     }
+    let mut todo = Vec::new();
+    for (rel, name) in named {
+        match repo.target(&rel) {
+            Some(t) => {
+                out!("{rel}::{name}:\n  run   {rel}::{name}  (named test)");
+                todo.push(named_job(&root, &cfg, t, &name, &extra));
+            }
+            None => {
+                eprintln!("t: {rel} holds no tests that t can run");
+                return ExitCode::from(2);
+            }
+        }
+    }
     if list {
         return ExitCode::SUCCESS;
     }
-    if chosen.is_empty() {
+    if chosen.is_empty() && todo.is_empty() {
         // Not a pass: nothing ran.
         out!("t: no test selected; nothing ran.");
         return ExitCode::from(4);
@@ -320,7 +357,8 @@ fn main() -> ExitCode {
         }
     }
     let mut code = 0u8;
-    for job in jobs(&root, &cfg, &chosen, &extra) {
+    todo.extend(jobs(&root, &cfg, &chosen, &extra));
+    for job in todo {
         out!("$ {}", shell_line(&job, &root));
         if dry {
             continue;
@@ -344,7 +382,30 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::diagnose;
+    use super::{config, diagnose, jobs, named_job, Target};
+    use std::path::Path;
+
+    fn rs(filter: &str) -> Target {
+        Target::Rust { ws: "/r".into(), pkg: "p".into(), test_bin: None, filter: filter.into() }
+    }
+
+    #[test]
+    fn takes_the_rust_runner_from_config() {
+        let cfg: config::Config = toml::from_str("[runner]\nrust = \"cargo test --locked\"\n").unwrap();
+        assert_eq!(jobs(Path::new("/r"), &cfg, &[(rs("m::"), String::new())], &[])[0].argv, ["cargo", "test", "--locked", "-q", "-p", "p", "m::"]);
+    }
+
+    #[test]
+    fn runs_one_named_test() {
+        let cfg = config::Config::default();
+        let one = |t| named_job(Path::new("/r"), &cfg, t, "it_works", &[]).argv;
+        assert_eq!(one(rs("m::")), ["cargo", "test", "-q", "-p", "p", "m::it_works"]);
+        assert_eq!(one(rs("")), ["cargo", "test", "-q", "-p", "p", "it_works"]);
+        assert_eq!(one(Target::Py("tests/test_a.py".into())).last().unwrap(), "tests/test_a.py::it_works");
+        assert_eq!(one(Target::Go { module: "/r".into(), pkg: "./x".into() }), ["go", "test", "./x", "-run", "^it_works$"]);
+        assert_eq!(one(Target::Js { dir: "/r".into(), tool: "vitest", file: "a.test.ts".into() }), ["npx", "vitest", "run", "a.test.ts", "-t", "it_works"]);
+        assert_eq!(one(Target::Js { dir: "/r".into(), tool: "playwright", file: "a.spec.ts".into() })[4..], ["-g", "it_works"]);
+    }
 
     fn hint(lines: &[&str]) -> Option<String> {
         diagnose(&lines.iter().map(|s| s.to_string()).collect::<Vec<_>>())
