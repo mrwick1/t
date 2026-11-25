@@ -212,7 +212,27 @@ fn shell_line(job: &Job, root: &Path) -> String {
         Ok(r) => format!("(in {}) ", r.display()),
         Err(_) => format!("(in {}) ", job.cwd.display()),
     };
-    format!("{cd}{}", job.argv.join(" "))
+    let quote = |a: &String| {
+        if !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:=@%+,^$".contains(c)) {
+            a.clone()
+        } else {
+            format!("'{}'", a.replace('\'', "'\\''"))
+        }
+    };
+    format!("{cd}{}", job.argv.iter().map(quote).collect::<Vec<_>>().join(" "))
+}
+
+/// A passing run that ran no test: a filter or a test name that matched nothing.
+fn ran_none(lines: &[String]) -> bool {
+    if lines.iter().any(|l| l.contains("testing: warning: no tests to run")) {
+        return true;
+    }
+    let cargo: Vec<&String> = lines.iter().filter(|l| l.starts_with("test result:")).collect();
+    if !cargo.is_empty() {
+        return cargo.iter().all(|l| l.contains(" 0 passed; 0 failed;"));
+    }
+    // vitest "Tests  5 skipped (5)", jest "Tests:       5 skipped, 5 total".
+    lines.iter().map(|l| l.trim()).any(|l| l.starts_with("Tests") && l.contains("skipped") && !l.contains("passed") && !l.contains("failed"))
 }
 
 fn main() -> ExitCode {
@@ -364,6 +384,10 @@ fn main() -> ExitCode {
             continue;
         }
         match run(&job, &cfg.env) {
+            Ok((0, lines)) if ran_none(&lines) => {
+                out!("t: this command ran no test. Check the test name or the filter.");
+                code = code.max(4);
+            }
             Ok((0, _)) => {}
             Ok((c, lines)) => {
                 code = code.max(c.clamp(1, 255) as u8);
@@ -382,7 +406,7 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{config, diagnose, jobs, named_job, Target};
+    use super::{config, diagnose, jobs, named_job, ran_none, shell_line, Job, Target};
     use std::path::Path;
 
     fn rs(filter: &str) -> Target {
@@ -409,6 +433,24 @@ mod tests {
 
     fn hint(lines: &[&str]) -> Option<String> {
         diagnose(&lines.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn spots_a_run_that_ran_no_tests() {
+        let none = |l: &[&str]| ran_none(&l.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert!(none(&["running 0 tests", "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s"]));
+        assert!(!none(&["test result: ok. 1 passed; 0 failed; 0 ignored", "test result: ok. 0 passed; 0 failed; 0 ignored"]));
+        assert!(none(&["      Tests  5 skipped (5)"]));
+        assert!(!none(&["      Tests  1 passed | 4 skipped (5)"]));
+        assert!(none(&["Tests:       5 skipped, 5 total"]));
+        assert!(none(&["testing: warning: no tests to run", "ok  \tx\t0.01s"]));
+        assert!(!none(&["5 passed in 0.1s"]));
+    }
+
+    #[test]
+    fn quotes_arguments_in_the_shown_command() {
+        let job = Job { cwd: "/r".into(), argv: ["npx", "vitest", "-t", "keeps a token", "it's"].map(String::from).to_vec() };
+        assert_eq!(shell_line(&job, Path::new("/r")), "npx vitest -t 'keeps a token' 'it'\\''s'");
     }
 
     #[test]
